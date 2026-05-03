@@ -11,12 +11,22 @@ const PORT = process.env.PORT || 3000;
 // Format: PROVIDER_1_ENDPOINT, PROVIDER_1_API_KEY, PROVIDER_1_MODEL
 //         PROVIDER_2_ENDPOINT, PROVIDER_2_API_KEY, PROVIDER_2_MODEL
 //         ...
+// Helper: Normalize endpoint URL by stripping trailing slash and /v1 suffix
+// This prevents double /v1 paths when constructing upstream URLs
+function normalizeEndpoint(url) {
+  let normalized = url.replace(/\/+$/, ''); // strip trailing slashes
+  // Strip trailing /v1 (case-insensitive) so we can always prepend it ourselves
+  normalized = normalized.replace(/\/v1$/i, '');
+  return normalized;
+}
+
 const providers = [];
 let providerIndex = 1;
 
 while (process.env[`PROVIDER_${providerIndex}_ENDPOINT`]) {
+  const rawEndpoint = process.env[`PROVIDER_${providerIndex}_ENDPOINT`];
   providers.push({
-    endpoint: process.env[`PROVIDER_${providerIndex}_ENDPOINT`],
+    endpoint: normalizeEndpoint(rawEndpoint),
     apiKey: process.env[`PROVIDER_${providerIndex}_API_KEY`],
     model: process.env[`PROVIDER_${providerIndex}_MODEL`] || 'gpt-3.5-turbo',
   });
@@ -374,8 +384,9 @@ function openaiStreamChunkToAnthropic(chunk, originalModel) {
   return events.length > 0 ? events : null;
 }
 
-// Main proxy endpoint
-app.post('/v1/chat/completions', async (req, res) => {
+// Main proxy endpoint (handle both /v1/chat/completions and /chat/completions
+// so clients with base URL ending in /v1 don't get double-prefixed)
+app.post(['/v1/chat/completions', '/chat/completions'], async (req, res) => {
   const originalModel = req.body.model || 'gpt-3.5-turbo';
   let lastError = null;
 
@@ -434,7 +445,7 @@ app.post('/v1/chat/completions', async (req, res) => {
 });
 
 // Streaming support
-app.post('/v1/chat/completions', async (req, res) => {
+app.post(['/v1/chat/completions', '/chat/completions'], async (req, res) => {
   if (!req.body.stream) {
     // Non-streaming handled above
     return;
@@ -545,8 +556,8 @@ app.get('/health', (req, res) => {
   });
 });
 
-// Models endpoints
-app.get('/v1/models', (req, res) => {
+// Models endpoints (handle both /v1/models and /models)
+app.get(['/v1/models', '/models'], (req, res) => {
   res.json({
     object: 'list',
     data: [
@@ -578,7 +589,7 @@ app.get('/v1/models', (req, res) => {
   });
 });
 
-app.get('/v1/models/:modelId', (req, res) => {
+app.get(['/v1/models/:modelId', '/models/:modelId'], (req, res) => {
   res.json({
     id: req.params.modelId,
     object: 'model',
@@ -592,7 +603,8 @@ app.get('/v1/models/:modelId', (req, res) => {
 // ==================== Anthropic API Endpoints ====================
 
 // Anthropic messages endpoint (non-streaming)
-app.post('/v1/messages', async (req, res) => {
+// Handle both /v1/messages and /messages for clients that include /v1 in base URL
+app.post(['/v1/messages', '/messages'], async (req, res) => {
   const originalModel = req.body.model || 'claude-3-opus-20240229';
   let lastError = null;
 
@@ -657,7 +669,7 @@ app.post('/v1/messages', async (req, res) => {
 });
 
 // Anthropic messages endpoint (streaming)
-app.post('/v1/messages', async (req, res) => {
+app.post(['/v1/messages', '/messages'], async (req, res) => {
   if (!req.body.stream) {
     // Non-streaming handled above
     return;
