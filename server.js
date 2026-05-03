@@ -45,10 +45,13 @@ app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 // Helper: Check if error is retryable
-// For a fallback proxy, virtually all provider errors should trigger fallback
-// since each provider has its own credentials, model, and endpoint.
+// For a fallback proxy, most provider errors should trigger fallback since each
+// provider has its own credentials, model, and endpoint. Only truly client-side
+// errors (malformed request body) should stop immediately.
 function isRetryableError(error, statusCode) {
-  // Always retry — the next provider may work even if this one returned 4xx
+  // 400 = bad request body — will fail on every provider, stop immediately
+  if (statusCode === 400) return false;
+  // Everything else (401, 403, 404, 429, 500+, network errors) is provider-specific
   return true;
 }
 
@@ -413,9 +416,14 @@ app.post(['/v1/chat/completions', '/chat/completions'], async (req, res) => {
       if (!response.ok) {
         let errorData;
         try { errorData = await response.json(); } catch (_) { errorData = {}; }
-        lastError = new Error(`Provider ${attempt} failed: ${(errorData.error && errorData.error.message) || response.statusText}`);
+        lastError = new Error(`Provider ${attempt} failed (${response.status}): ${(errorData.error && errorData.error.message) || response.statusText}`);
         console.error(`Provider ${attempt} error:`, lastError.message);
-        continue; // Always try next provider on failure
+
+        if (isRetryableError(lastError, response.status)) {
+          continue; // Try next provider
+        }
+        // Non-retryable error (e.g. 400 bad request) - return immediately
+        return res.status(response.status).json(errorData);
       }
 
       // === Streaming response ===
@@ -571,9 +579,20 @@ app.post(['/v1/messages', '/messages'], async (req, res) => {
       if (!response.ok) {
         let errorData;
         try { errorData = await response.json(); } catch (_) { errorData = {}; }
-        lastError = new Error(`Provider ${attempt} failed: ${(errorData.error && errorData.error.message) || response.statusText}`);
+        lastError = new Error(`Provider ${attempt} failed (${response.status}): ${(errorData.error && errorData.error.message) || response.statusText}`);
         console.error(`Provider ${attempt} error:`, lastError.message);
-        continue; // Always try next provider on failure
+
+        if (isRetryableError(lastError, response.status)) {
+          continue; // Try next provider
+        }
+        // Non-retryable error - return Anthropic-style error immediately
+        return res.status(response.status).json({
+          type: 'error',
+          error: {
+            type: (errorData.error && errorData.error.type) || 'api_error',
+            message: (errorData.error && errorData.error.message) || response.statusText,
+          },
+        });
       }
 
       // === Streaming response ===
