@@ -30,37 +30,6 @@ if (providers.length === 0) {
 
 console.log(`Loaded ${providers.length} provider(s) for fallback`);
 
-// Model mapping: Maps requested model names to provider models
-// Format: REQUESTED_MODEL=PROVIDER_INDEX
-// Example: claude-opus-4-7=1 means requests for claude-opus-4-7 use provider 1's model
-const modelMapping = {};
-let modelMapIndex = 1;
-
-while (process.env[`MODEL_MAP_${modelMapIndex}_REQUESTED`]) {
-  const requested = process.env[`MODEL_MAP_${modelMapIndex}_REQUESTED`];
-  const providerIndex = parseInt(process.env[`MODEL_MAP_${modelMapIndex}_PROVIDER`] || '1');
-  modelMapping[requested] = providerIndex;
-  modelMapIndex++;
-}
-
-console.log(`Loaded ${Object.keys(modelMapping).length} model mapping(s)`);
-
-// Helper: Get provider index for requested model
-function getProviderForModel(modelName) {
-  if (modelMapping[modelName]) {
-    return modelMapping[modelName];
-  }
-  // Default to first provider if no mapping found
-  return 1;
-}
-
-// Helper: Get actual model name for requested model
-function getActualModelName(requestedModel) {
-  const providerIndex = getProviderForModel(requestedModel);
-  const provider = providers[providerIndex - 1];
-  return provider ? provider.model : requestedModel;
-}
-
 // Middleware
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
@@ -96,9 +65,18 @@ function transformRequest(body, provider) {
   return transformed;
 }
 
-// Helper: Transform response - keep actual model name from provider
-function transformResponse(response) {
-  // Don't transform model name - keep the actual model that was used
+// Helper: Transform response back to original model name
+function transformResponse(response, originalModel) {
+  if (response.choices && response.choices.length > 0) {
+    response.choices.forEach(choice => {
+      if (choice.model) {
+        choice.model = originalModel;
+      }
+    });
+  }
+  if (response.model) {
+    response.model = originalModel;
+  }
   return response;
 }
 
@@ -489,6 +467,50 @@ app.get('/health', (req, res) => {
       model: p.model,
       has_api_key: !!p.apiKey,
     })),
+  });
+});
+
+// Models endpoints
+app.get('/v1/models', (req, res) => {
+  res.json({
+    object: 'list',
+    data: [
+      {
+        id: 'proxy_fallback',
+        object: 'model',
+        created: Math.floor(Date.now() / 1000),
+        owned_by: 'system',
+        type: 'model',
+        display_name: 'Proxy Fallback'
+      },
+      {
+        id: 'claude-3-5-sonnet-20241022',
+        object: 'model',
+        created: Math.floor(Date.now() / 1000),
+        owned_by: 'system',
+        type: 'model',
+        display_name: 'Claude 3.5 Sonnet'
+      },
+      {
+        id: 'claude-3-7-sonnet-20250219',
+        object: 'model',
+        created: Math.floor(Date.now() / 1000),
+        owned_by: 'system',
+        type: 'model',
+        display_name: 'Claude 3.7 Sonnet'
+      }
+    ]
+  });
+});
+
+app.get('/v1/models/:modelId', (req, res) => {
+  res.json({
+    id: req.params.modelId,
+    object: 'model',
+    created: Math.floor(Date.now() / 1000),
+    owned_by: 'system',
+    type: 'model',
+    display_name: req.params.modelId
   });
 });
 
