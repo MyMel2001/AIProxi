@@ -44,17 +44,6 @@ console.log(`Loaded ${providers.length} provider(s) for fallback`);
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-// CORS middleware to prevent 405 Method Not Allowed from browser/extension clients
-app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, x-api-key, anthropic-version');
-  if (req.method === 'OPTIONS') {
-    return res.sendStatus(200);
-  }
-  next();
-});
-
 // Helper: Check if error is retryable
 // For a fallback proxy, almost ALL provider errors should trigger fallback since each
 // provider has its own credentials, model, endpoint, AND capabilities. For example,
@@ -64,67 +53,17 @@ function isRetryableError(error, statusCode) {
   return true;
 }
 
-// Helper: Sanitize payload to only include standard OpenAI chat completion fields.
-// This strips out telemetry or tool-specific parameters (like `client_metadata`) 
-// that cause strict upstream providers (Groq, Ollama) to return 400 Bad Request.
-function sanitizePayload(body) {
-  const allowedFields = [
-    'model', 'messages', 'temperature', 'top_p', 'n', 'stream', 'stop', 
-    'max_tokens', 'max_completion_tokens', 'presence_penalty', 'frequency_penalty', 
-    'logit_bias', 'user', 'tools', 'tool_choice', 'response_format', 'seed', 
-    'service_tier', 'parallel_tool_calls'
-  ];
-  
-  const sanitized = {};
-  for (const field of allowedFields) {
-    if (body[field] !== undefined) {
-      sanitized[field] = body[field];
-    }
-  }
-  return sanitized;
-}
-
-// Helper: Normalize messages for strict upstream providers
-// Maps 'developer' role to 'system', flattens array-based text content for system messages,
-// and removes non-standard properties (like 'type') from the message object.
-function normalizeMessages(messages) {
-  if (!Array.isArray(messages)) return messages;
-  return messages.map(msg => {
-    // Only copy standard OpenAI message fields to avoid validation errors
-    const newMsg = {};
-    if (msg.role) newMsg.role = msg.role;
-    if (msg.content !== undefined) newMsg.content = msg.content;
-    if (msg.name) newMsg.name = msg.name;
-    if (msg.tool_call_id) newMsg.tool_call_id = msg.tool_call_id;
-    if (msg.tool_calls) newMsg.tool_calls = msg.tool_calls;
-    
-    if (newMsg.role === 'developer') {
-      newMsg.role = 'system';
-    }
-    
-    if (newMsg.role === 'system' && Array.isArray(newMsg.content)) {
-      newMsg.content = newMsg.content
-        .filter(part => part.type === 'text')
-        .map(part => part.text)
-        .join('\n');
-    }
-    
-    return newMsg;
-  });
-}
-
 // Helper: Transform request for multimodal support
 function transformRequest(body, provider) {
-  const transformed = sanitizePayload(body);
+  const transformed = { ...body };
 
   // Override model with provider's model
   if (provider.model) {
     transformed.model = provider.model;
   }
 
-  // Handle multimodal content (images, audio, etc.) and normalize roles
+  // Handle multimodal content (images, audio, etc.)
   if (transformed.messages) {
-    transformed.messages = normalizeMessages(transformed.messages);
     transformed.messages = transformed.messages.map(msg => {
       if (Array.isArray(msg.content)) {
         // Multimodal content - preserve as-is for providers that support it
@@ -446,72 +385,6 @@ function openaiStreamChunkToAnthropic(chunk, originalModel) {
   return events.length > 0 ? events : null;
 }
 
-// Helper: Transform Responses API request to Chat Completions format
-function responsesToChatCompletions(body, provider) {
-  // Use sanitizePayload but also temporarily allow 'input' and 'instructions' 
-  // so we can read them before deleting them.
-  const tempBody = { ...body };
-  if (body.input) tempBody.messages = []; // placeholder so sanitize doesn't strip it
-  
-  const transformed = sanitizePayload(tempBody);
-  transformed.model = provider.model || body.model;
-  
-  // Some clients mistakenly send standard 'messages' to /v1/responses.
-  // We must preserve them to avoid sending an empty messages array (which causes 400 errors).
-  const messages = Array.isArray(body.messages) ? [...body.messages] : [];
-  
-  if (body.instructions) {
-    messages.push({ role: 'system', content: body.instructions });
-  }
-  
-  if (body.input) {
-    if (typeof body.input === 'string') {
-      messages.push({ role: 'user', content: body.input });
-    } else if (Array.isArray(body.input)) {
-      messages.push(...body.input);
-    }
-  }
-  
-  transformed.messages = normalizeMessages(messages);
-  return transformed;
-}
-
-// Helper: Transform Chat Completions response to Responses API format
-function chatCompletionsToResponses(response, originalModel) {
-  const transformed = { ...response };
-  if (originalModel) transformed.model = originalModel;
-  transformed.object = 'response';
-  
-  if (response.choices) {
-    transformed.output = response.choices.map(choice => ({
-      type: 'message',
-      message: choice.message,
-      finish_reason: choice.finish_reason
-    }));
-    delete transformed.choices;
-  }
-  
-  return transformed;
-}
-
-// Helper: Transform OpenAI streaming chunk to Responses API chunk
-function openaiStreamChunkToResponses(chunk, originalModel) {
-  const transformed = { ...chunk };
-  if (originalModel) transformed.model = originalModel;
-  transformed.object = 'response.chunk';
-  
-  if (chunk.choices) {
-    transformed.output = chunk.choices.map(choice => ({
-      type: 'message',
-      message: choice.delta,
-      finish_reason: choice.finish_reason
-    }));
-    delete transformed.choices;
-  }
-  
-  return transformed;
-}
-
 // Main proxy endpoint (handle both /v1/chat/completions and /chat/completions
 // so clients with base URL ending in /v1 don't get double-prefixed)
 app.post(['/v1/chat/completions', '/chat/completions'], async (req, res) => {
@@ -615,10 +488,10 @@ app.post(['/v1/chat/completions', '/chat/completions'], async (req, res) => {
   });
 });
 
-// Responses API endpoint (for tools like Codex using /v1/responses)
-app.post(['/v1/responses', '/responses'], async (req, res) => {
+// OpenAI Completions endpoint (Codex support)
+app.post(['/v1/completions', '/completions'], async (req, res) => {
   const isStreaming = !!req.body.stream;
-  const originalModel = req.body.model || 'gpt-4o';
+  const originalModel = req.body.model || 'gpt-3.5-turbo-instruct';
   let lastError = null;
 
   for (let i = 0; i < providers.length; i++) {
@@ -626,12 +499,10 @@ app.post(['/v1/responses', '/responses'], async (req, res) => {
     const attempt = i + 1;
 
     try {
-      console.log(`Responses API ${isStreaming ? 'streaming ' : ''}attempt ${attempt}/${providers.length}: Using provider ${provider.endpoint} with model ${provider.model}`);
+      console.log(`${isStreaming ? 'Streaming completion ' : 'Completion '}attempt ${attempt}/${providers.length}: Using provider ${provider.endpoint} with model ${provider.model}`);
 
-      // Translate from Responses API format to standard Chat Completions format
-      const transformedBody = responsesToChatCompletions(req.body, provider);
-      // All underlying providers only support the legacy /v1/chat/completions endpoint
-      const url = `${provider.endpoint}/v1/chat/completions`;
+      const transformedBody = transformRequest(req.body, provider);
+      const url = `${provider.endpoint}/v1/completions`;
 
       const headers = { 'Content-Type': 'application/json' };
       if (provider.apiKey && provider.apiKey.length > 1) {
@@ -653,7 +524,6 @@ app.post(['/v1/responses', '/responses'], async (req, res) => {
         if (isRetryableError(lastError, response.status)) {
           continue; // Try next provider
         }
-        // Non-retryable error (e.g. 400 bad request) - return immediately
         return res.status(response.status).json(errorData);
       }
 
@@ -678,8 +548,7 @@ app.post(['/v1/responses', '/responses'], async (req, res) => {
 
                 try {
                   const parsed = JSON.parse(data);
-                  // Translate the streamed chunk back to Responses API format
-                  const transformed = openaiStreamChunkToResponses(parsed, originalModel);
+                  const transformed = transformResponse(parsed, originalModel);
                   res.write(`data: ${JSON.stringify(transformed)}\n\n`);
                 } catch (e) {
                   res.write(line + '\n');
@@ -699,17 +568,10 @@ app.post(['/v1/responses', '/responses'], async (req, res) => {
 
       // === Non-streaming response ===
       const responseData = await response.json();
-      // Translate the response back to Responses API format
-      const finalResponse = chatCompletionsToResponses(responseData, originalModel);
+      const finalResponse = transformResponse(responseData, originalModel);
       return res.json(finalResponse);
 
     } catch (error) {
-      if (error.code === 'ECONNREFUSED' || error.code === 'ENOTFOUND' || error.type === 'system') {
-        lastError = error;
-        console.error(`Provider ${attempt} network error:`, error.message);
-        continue;
-      }
-
       lastError = error;
       console.error(`Provider ${attempt} error:`, error.message);
       continue;
@@ -717,7 +579,7 @@ app.post(['/v1/responses', '/responses'], async (req, res) => {
   }
 
   // All providers failed
-  console.error('All providers failed for Responses API request');
+  console.error('All providers failed for completions request');
   return res.status(500).json({
     error: {
       message: (lastError && lastError.message) || 'All providers failed',
@@ -726,7 +588,6 @@ app.post(['/v1/responses', '/responses'], async (req, res) => {
     },
   });
 });
-
 
 // Health check endpoint
 app.get('/health', (req, res) => {
