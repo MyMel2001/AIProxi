@@ -68,15 +68,23 @@ function transformRequest(body, provider) {
       // Normalize role
       const role = msg.role === 'developer' ? 'system' : msg.role;
       
-      // Normalize content blocks (e.g. input_text -> text)
+      // Normalize content blocks (e.g. input_text -> text, or flatten to string)
       let content = msg.content;
       if (Array.isArray(content)) {
-        content = content.map(block => {
-          if (typeof block === 'object' && block !== null && block.type === 'input_text') {
-            return { ...block, type: 'text' };
-          }
-          return block;
-        });
+        const allText = content.every(block => 
+          typeof block === 'object' && block !== null && 
+          (block.type === 'text' || block.type === 'input_text')
+        );
+        if (allText) {
+          content = content.map(block => block.text || '').join('\n');
+        } else {
+          content = content.map(block => {
+            if (typeof block === 'object' && block !== null && block.type === 'input_text') {
+              return { ...block, type: 'text' };
+            }
+            return block;
+          });
+        }
       }
       
       return { ...msg, role, content };
@@ -419,10 +427,17 @@ function responsesToChat(body, provider) {
     return role;
   };
 
-  // Helper to normalize content blocks (e.g. input_text -> text)
+  // Helper to normalize content blocks (e.g. input_text -> text) and flatten if possible
   const normalizeContent = (content) => {
     if (typeof content === 'string') return content;
     if (Array.isArray(content)) {
+      const allText = content.every(block => 
+        typeof block === 'object' && block !== null && 
+        (block.type === 'text' || block.type === 'input_text')
+      );
+      if (allText) {
+        return content.map(block => block.text || '').join('\n');
+      }
       return content.map(block => {
         if (typeof block === 'object' && block !== null) {
           if (block.type === 'input_text') {
