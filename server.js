@@ -404,12 +404,14 @@ app.post(['/v1/chat/completions', '/chat/completions'], async (req, res) => {
       const transformedBody = transformRequest(req.body, provider);
       const url = `${provider.endpoint}/v1/chat/completions`;
 
+      const headers = { 'Content-Type': 'application/json' };
+      if (provider.apiKey && provider.apiKey.length > 1) {
+        headers['Authorization'] = `Bearer ${provider.apiKey}`;
+      }
+
       const response = await fetch(url, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${provider.apiKey}`,
-        },
+        headers,
         body: JSON.stringify(transformedBody),
       });
 
@@ -565,12 +567,14 @@ app.post(['/v1/messages', '/messages'], async (req, res) => {
       const transformedBody = anthropicToOpenai(req.body, provider);
       const url = `${provider.endpoint}/v1/chat/completions`;
 
+      const headers = { 'Content-Type': 'application/json' };
+      if (provider.apiKey && provider.apiKey.length > 1) {
+        headers['Authorization'] = `Bearer ${provider.apiKey}`;
+      }
+
       const response = await fetch(url, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${provider.apiKey}`,
-        },
+        headers,
         body: JSON.stringify(transformedBody),
       });
 
