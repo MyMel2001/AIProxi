@@ -1,7 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "Bash(node --check /Users/sparky/Code/AIProxi/server.js)"
+      "Bash(node --check /Users/sparky/Code/AIProxi/server.js)",
+      "Bash(node server.js)",
+      "Bash(curl -s http://localhost:9777/health)"
     ]
   }
 }

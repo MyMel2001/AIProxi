@@ -465,7 +465,7 @@ app.get('/health', (req, res) => {
       index: i + 1,
       endpoint: p.endpoint,
       model: p.model,
-      has_api_key: !!p.api_key,
+      has_api_key: !!p.apiKey,
     })),
   });
 });
