@@ -45,13 +45,11 @@ app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 // Helper: Check if error is retryable
-// For a fallback proxy, most provider errors should trigger fallback since each
-// provider has its own credentials, model, and endpoint. Only truly client-side
-// errors (malformed request body) should stop immediately.
+// For a fallback proxy, almost ALL provider errors should trigger fallback since each
+// provider has its own credentials, model, endpoint, AND capabilities. For example,
+// a 400 Bad Request on one provider might be because it doesn't support the `tools`
+// parameter, while the next provider does. Therefore, we always retry.
 function isRetryableError(error, statusCode) {
-  // 400 = bad request body — will fail on every provider, stop immediately
-  if (statusCode === 400) return false;
-  // Everything else (401, 403, 404, 429, 500+, network errors) is provider-specific
   return true;
 }
 
