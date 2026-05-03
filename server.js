@@ -385,9 +385,70 @@ function openaiStreamChunkToAnthropic(chunk, originalModel) {
   return events.length > 0 ? events : null;
 }
 
+// Helper: Transform Responses API request to Chat Completions format
+function responsesToChatCompletions(body, provider) {
+  const transformed = { ...body };
+  transformed.model = provider.model || body.model;
+  
+  const messages = [];
+  
+  if (body.instructions) {
+    messages.push({ role: 'system', content: body.instructions });
+    delete transformed.instructions;
+  }
+  
+  if (body.input) {
+    if (typeof body.input === 'string') {
+      messages.push({ role: 'user', content: body.input });
+    } else if (Array.isArray(body.input)) {
+      messages.push(...body.input);
+    }
+    delete transformed.input;
+  }
+  
+  transformed.messages = messages;
+  return transformed;
+}
+
+// Helper: Transform Chat Completions response to Responses API format
+function chatCompletionsToResponses(response, originalModel) {
+  const transformed = { ...response };
+  if (originalModel) transformed.model = originalModel;
+  transformed.object = 'response';
+  
+  if (response.choices) {
+    transformed.output = response.choices.map(choice => ({
+      type: 'message',
+      message: choice.message,
+      finish_reason: choice.finish_reason
+    }));
+    delete transformed.choices;
+  }
+  
+  return transformed;
+}
+
+// Helper: Transform OpenAI streaming chunk to Responses API chunk
+function openaiStreamChunkToResponses(chunk, originalModel) {
+  const transformed = { ...chunk };
+  if (originalModel) transformed.model = originalModel;
+  transformed.object = 'response.chunk';
+  
+  if (chunk.choices) {
+    transformed.output = chunk.choices.map(choice => ({
+      type: 'message',
+      message: choice.delta,
+      finish_reason: choice.finish_reason
+    }));
+    delete transformed.choices;
+  }
+  
+  return transformed;
+}
+
 // Main proxy endpoint (handle both /v1/chat/completions and /chat/completions
-// so clients with base URL ending in /v1 don't get double-prefixed. Also handle /v1/responses for Codex)
-app.post(['/v1/chat/completions', '/chat/completions', '/v1/responses', '/responses'], async (req, res) => {
+// so clients with base URL ending in /v1 don't get double-prefixed)
+app.post(['/v1/chat/completions', '/chat/completions'], async (req, res) => {
   const isStreaming = !!req.body.stream;
   const originalModel = req.body.model || 'gpt-3.5-turbo';
   let lastError = null;
@@ -487,6 +548,119 @@ app.post(['/v1/chat/completions', '/chat/completions', '/v1/responses', '/respon
     },
   });
 });
+
+// Responses API endpoint (for tools like Codex using /v1/responses)
+app.post(['/v1/responses', '/responses'], async (req, res) => {
+  const isStreaming = !!req.body.stream;
+  const originalModel = req.body.model || 'gpt-4o';
+  let lastError = null;
+
+  for (let i = 0; i < providers.length; i++) {
+    const provider = providers[i];
+    const attempt = i + 1;
+
+    try {
+      console.log(`Responses API ${isStreaming ? 'streaming ' : ''}attempt ${attempt}/${providers.length}: Using provider ${provider.endpoint} with model ${provider.model}`);
+
+      // Translate from Responses API format to standard Chat Completions format
+      const transformedBody = responsesToChatCompletions(req.body, provider);
+      // All underlying providers only support the legacy /v1/chat/completions endpoint
+      const url = `${provider.endpoint}/v1/chat/completions`;
+
+      const headers = { 'Content-Type': 'application/json' };
+      if (provider.apiKey && provider.apiKey.length > 1) {
+        headers['Authorization'] = `Bearer ${provider.apiKey}`;
+      }
+
+      const response = await fetch(url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(transformedBody),
+      });
+
+      if (!response.ok) {
+        let errorData;
+        try { errorData = await response.json(); } catch (_) { errorData = {}; }
+        lastError = new Error(`Provider ${attempt} failed (${response.status}): ${(errorData.error && errorData.error.message) || response.statusText}`);
+        console.error(`Provider ${attempt} error:`, lastError.message);
+
+        if (isRetryableError(lastError, response.status)) {
+          continue; // Try next provider
+        }
+        // Non-retryable error (e.g. 400 bad request) - return immediately
+        return res.status(response.status).json(errorData);
+      }
+
+      // === Streaming response ===
+      if (isStreaming) {
+        res.setHeader('Content-Type', 'text/event-stream');
+        res.setHeader('Cache-Control', 'no-cache');
+        res.setHeader('Connection', 'keep-alive');
+
+        await new Promise((resolve, reject) => {
+          response.body.on('data', (buf) => {
+            const chunk = buf.toString();
+            const lines = chunk.split('\n');
+
+            for (const line of lines) {
+              if (line.startsWith('data: ')) {
+                const data = line.slice(6);
+                if (data === '[DONE]') {
+                  res.write('data: [DONE]\n\n');
+                  continue;
+                }
+
+                try {
+                  const parsed = JSON.parse(data);
+                  // Translate the streamed chunk back to Responses API format
+                  const transformed = openaiStreamChunkToResponses(parsed, originalModel);
+                  res.write(`data: ${JSON.stringify(transformed)}\n\n`);
+                } catch (e) {
+                  res.write(line + '\n');
+                }
+              } else if (line.trim()) {
+                res.write(line + '\n');
+              }
+            }
+          });
+          response.body.on('end', resolve);
+          response.body.on('error', reject);
+        });
+
+        res.end();
+        return;
+      }
+
+      // === Non-streaming response ===
+      const responseData = await response.json();
+      // Translate the response back to Responses API format
+      const finalResponse = chatCompletionsToResponses(responseData, originalModel);
+      return res.json(finalResponse);
+
+    } catch (error) {
+      if (error.code === 'ECONNREFUSED' || error.code === 'ENOTFOUND' || error.type === 'system') {
+        lastError = error;
+        console.error(`Provider ${attempt} network error:`, error.message);
+        continue;
+      }
+
+      lastError = error;
+      console.error(`Provider ${attempt} error:`, error.message);
+      continue;
+    }
+  }
+
+  // All providers failed
+  console.error('All providers failed for Responses API request');
+  return res.status(500).json({
+    error: {
+      message: (lastError && lastError.message) || 'All providers failed',
+      type: 'api_error',
+      code: 'all_providers_failed',
+    },
+  });
+});
+
 
 // Health check endpoint
 app.get('/health', (req, res) => {
