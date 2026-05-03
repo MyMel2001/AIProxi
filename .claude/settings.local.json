@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node --check /Users/sparky/Code/AIProxi/server.js)"
+    ]
+  }
+}

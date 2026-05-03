@@ -106,7 +106,7 @@ function anthropicToOpenai(body, provider) {
             if (block.type === 'image') {
               return {
                 type: 'image_url',
-                image_url: { url: block.source?.data || block.source?.url },
+                image_url: { url: (block.source && block.source.data) || (block.source && block.source.url) },
               };
             }
             if (block.type === 'text') {
@@ -194,7 +194,7 @@ function openaiToAnthropic(response, originalModel) {
             if (block.type === 'image_url') {
               return {
                 type: 'image',
-                source: { url: block.image_url?.url },
+                source: { url: block.image_url && block.image_url.url },
               };
             }
             return block;
@@ -326,7 +326,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       const responseData = await response.json();
 
       if (!response.ok) {
-        lastError = new Error(`Provider ${attempt} failed: ${responseData.error?.message || response.statusText}`);
+        lastError = new Error(`Provider ${attempt} failed: ${(responseData.error && responseData.error.message) || response.statusText}`);
         console.error(`Provider ${attempt} error:`, lastError.message);
 
         if (isRetryableError(lastError, response.status)) {
@@ -351,7 +351,7 @@ app.post('/v1/chat/completions', async (req, res) => {
   console.error('All providers failed');
   return res.status(500).json({
     error: {
-      message: lastError?.message || 'All providers failed',
+      message: (lastError && lastError.message) || 'All providers failed',
       type: 'api_error',
       code: 'all_providers_failed',
     },
@@ -389,7 +389,7 @@ app.post('/v1/chat/completions', async (req, res) => {
 
       if (!response.ok) {
         const errorData = await response.json();
-        lastError = new Error(`Provider ${attempt} failed: ${errorData.error?.message || response.statusText}`);
+        lastError = new Error(`Provider ${attempt} failed: ${(errorData.error && errorData.error.message) || response.statusText}`);
         console.error(`Provider ${attempt} error:`, lastError.message);
 
         if (isRetryableError(lastError, response.status)) {
@@ -449,7 +449,7 @@ app.post('/v1/chat/completions', async (req, res) => {
   console.error('All providers failed for streaming');
   return res.status(500).json({
     error: {
-      message: lastError?.message || 'All providers failed',
+      message: (lastError && lastError.message) || 'All providers failed',
       type: 'api_error',
       code: 'all_providers_failed',
     },
@@ -499,7 +499,7 @@ app.post('/v1/messages', async (req, res) => {
       const responseData = await response.json();
 
       if (!response.ok) {
-        lastError = new Error(`Provider ${attempt} failed: ${responseData.error?.message || response.statusText}`);
+        lastError = new Error(`Provider ${attempt} failed: ${(responseData.error && responseData.error.message) || response.statusText}`);
         console.error(`Provider ${attempt} error:`, lastError.message);
 
         if (isRetryableError(lastError, response.status)) {
@@ -532,7 +532,7 @@ app.post('/v1/messages', async (req, res) => {
     type: 'error',
     error: {
       type: 'api_error',
-      message: lastError?.message || 'All providers failed',
+      message: (lastError && lastError.message) || 'All providers failed',
     },
   });
 });
@@ -568,7 +568,7 @@ app.post('/v1/messages', async (req, res) => {
 
       if (!response.ok) {
         const errorData = await response.json();
-        lastError = new Error(`Provider ${attempt} failed: ${errorData.error?.message || response.statusText}`);
+        lastError = new Error(`Provider ${attempt} failed: ${(errorData.error && errorData.error.message) || response.statusText}`);
         console.error(`Provider ${attempt} error:`, lastError.message);
 
         if (isRetryableError(lastError, response.status)) {
@@ -577,8 +577,8 @@ app.post('/v1/messages', async (req, res) => {
         return res.status(response.status).json({
           type: 'error',
           error: {
-            type: errorData.error?.type || 'api_error',
-            message: errorData.error?.message || response.statusText,
+            type: (errorData.error && errorData.error.type) || 'api_error',
+            message: (errorData.error && errorData.error.message) || response.statusText,
           },
         });
       }
@@ -640,7 +640,7 @@ app.post('/v1/messages', async (req, res) => {
     type: 'error',
     error: {
       type: 'api_error',
-      message: lastError?.message || 'All providers failed',
+      message: (lastError && lastError.message) || 'All providers failed',
     },
   });
 });
