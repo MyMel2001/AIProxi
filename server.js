@@ -509,8 +509,8 @@ app.post('/v1/messages', async (req, res) => {
         return res.status(response.status).json({
           type: 'error',
           error: {
-            type: responseData.error?.type || 'api_error',
-            message: responseData.error?.message || response.statusText,
+            type: (responseData.error && responseData.error.type) || 'api_error',
+            message: (responseData.error && responseData.error.message) || response.statusText,
           },
         });
       }
