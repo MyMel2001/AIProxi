@@ -84,6 +84,28 @@ function sanitizePayload(body) {
   return sanitized;
 }
 
+// Helper: Normalize messages for strict upstream providers
+// Maps 'developer' role to 'system' and flattens array-based text content for system messages.
+function normalizeMessages(messages) {
+  if (!Array.isArray(messages)) return messages;
+  return messages.map(msg => {
+    const newMsg = { ...msg };
+    
+    if (newMsg.role === 'developer') {
+      newMsg.role = 'system';
+    }
+    
+    if (newMsg.role === 'system' && Array.isArray(newMsg.content)) {
+      newMsg.content = newMsg.content
+        .filter(part => part.type === 'text')
+        .map(part => part.text)
+        .join('\n');
+    }
+    
+    return newMsg;
+  });
+}
+
 // Helper: Transform request for multimodal support
 function transformRequest(body, provider) {
   const transformed = sanitizePayload(body);
@@ -93,8 +115,9 @@ function transformRequest(body, provider) {
     transformed.model = provider.model;
   }
 
-  // Handle multimodal content (images, audio, etc.)
+  // Handle multimodal content (images, audio, etc.) and normalize roles
   if (transformed.messages) {
+    transformed.messages = normalizeMessages(transformed.messages);
     transformed.messages = transformed.messages.map(msg => {
       if (Array.isArray(msg.content)) {
         // Multimodal content - preserve as-is for providers that support it
@@ -442,7 +465,7 @@ function responsesToChatCompletions(body, provider) {
     }
   }
   
-  transformed.messages = messages;
+  transformed.messages = normalizeMessages(messages);
   return transformed;
 }
 
