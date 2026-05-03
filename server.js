@@ -44,6 +44,17 @@ console.log(`Loaded ${providers.length} provider(s) for fallback`);
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
+// CORS middleware to prevent 405 Method Not Allowed from browser/extension clients
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, x-api-key, anthropic-version');
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(200);
+  }
+  next();
+});
+
 // Helper: Check if error is retryable
 // For a fallback proxy, almost ALL provider errors should trigger fallback since each
 // provider has its own credentials, model, endpoint, AND capabilities. For example,
@@ -390,7 +401,9 @@ function responsesToChatCompletions(body, provider) {
   const transformed = { ...body };
   transformed.model = provider.model || body.model;
   
-  const messages = [];
+  // Some clients mistakenly send standard 'messages' to /v1/responses.
+  // We must preserve them to avoid sending an empty messages array (which causes 400 errors).
+  const messages = Array.isArray(body.messages) ? [...body.messages] : [];
   
   if (body.instructions) {
     messages.push({ role: 'system', content: body.instructions });
