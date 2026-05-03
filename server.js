@@ -64,9 +64,29 @@ function isRetryableError(error, statusCode) {
   return true;
 }
 
+// Helper: Sanitize payload to only include standard OpenAI chat completion fields.
+// This strips out telemetry or tool-specific parameters (like `client_metadata`) 
+// that cause strict upstream providers (Groq, Ollama) to return 400 Bad Request.
+function sanitizePayload(body) {
+  const allowedFields = [
+    'model', 'messages', 'temperature', 'top_p', 'n', 'stream', 'stop', 
+    'max_tokens', 'max_completion_tokens', 'presence_penalty', 'frequency_penalty', 
+    'logit_bias', 'user', 'tools', 'tool_choice', 'response_format', 'seed', 
+    'service_tier', 'parallel_tool_calls'
+  ];
+  
+  const sanitized = {};
+  for (const field of allowedFields) {
+    if (body[field] !== undefined) {
+      sanitized[field] = body[field];
+    }
+  }
+  return sanitized;
+}
+
 // Helper: Transform request for multimodal support
 function transformRequest(body, provider) {
-  const transformed = { ...body };
+  const transformed = sanitizePayload(body);
 
   // Override model with provider's model
   if (provider.model) {
@@ -398,7 +418,12 @@ function openaiStreamChunkToAnthropic(chunk, originalModel) {
 
 // Helper: Transform Responses API request to Chat Completions format
 function responsesToChatCompletions(body, provider) {
-  const transformed = { ...body };
+  // Use sanitizePayload but also temporarily allow 'input' and 'instructions' 
+  // so we can read them before deleting them.
+  const tempBody = { ...body };
+  if (body.input) tempBody.messages = []; // placeholder so sanitize doesn't strip it
+  
+  const transformed = sanitizePayload(tempBody);
   transformed.model = provider.model || body.model;
   
   // Some clients mistakenly send standard 'messages' to /v1/responses.
@@ -407,7 +432,6 @@ function responsesToChatCompletions(body, provider) {
   
   if (body.instructions) {
     messages.push({ role: 'system', content: body.instructions });
-    delete transformed.instructions;
   }
   
   if (body.input) {
@@ -416,7 +440,6 @@ function responsesToChatCompletions(body, provider) {
     } else if (Array.isArray(body.input)) {
       messages.push(...body.input);
     }
-    delete transformed.input;
   }
   
   transformed.messages = messages;
