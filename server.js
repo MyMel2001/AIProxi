@@ -432,36 +432,34 @@ app.post(['/v1/chat/completions', '/chat/completions'], async (req, res) => {
         res.setHeader('Cache-Control', 'no-cache');
         res.setHeader('Connection', 'keep-alive');
 
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
+        await new Promise((resolve, reject) => {
+          response.body.on('data', (buf) => {
+            const chunk = buf.toString();
+            const lines = chunk.split('\n');
 
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
+            for (const line of lines) {
+              if (line.startsWith('data: ')) {
+                const data = line.slice(6);
+                if (data === '[DONE]') {
+                  res.write('data: [DONE]\n\n');
+                  continue;
+                }
 
-          const chunk = decoder.decode(value);
-          const lines = chunk.split('\n');
-
-          for (const line of lines) {
-            if (line.startsWith('data: ')) {
-              const data = line.slice(6);
-              if (data === '[DONE]') {
-                res.write('data: [DONE]\n\n');
-                continue;
-              }
-
-              try {
-                const parsed = JSON.parse(data);
-                const transformed = transformResponse(parsed, originalModel);
-                res.write(`data: ${JSON.stringify(transformed)}\n\n`);
-              } catch (e) {
+                try {
+                  const parsed = JSON.parse(data);
+                  const transformed = transformResponse(parsed, originalModel);
+                  res.write(`data: ${JSON.stringify(transformed)}\n\n`);
+                } catch (e) {
+                  res.write(line + '\n');
+                }
+              } else if (line.trim()) {
                 res.write(line + '\n');
               }
-            } else if (line.trim()) {
-              res.write(line + '\n');
             }
-          }
-        }
+          });
+          response.body.on('end', resolve);
+          response.body.on('error', reject);
+        });
 
         res.end();
         return;
@@ -601,43 +599,41 @@ app.post(['/v1/messages', '/messages'], async (req, res) => {
         res.setHeader('Cache-Control', 'no-cache');
         res.setHeader('Connection', 'keep-alive');
 
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
+        await new Promise((resolve, reject) => {
+          response.body.on('data', (buf) => {
+            const chunk = buf.toString();
+            const lines = chunk.split('\n');
 
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-
-          const chunk = decoder.decode(value);
-          const lines = chunk.split('\n');
-
-          for (const line of lines) {
-            if (line.startsWith('data: ')) {
-              const data = line.slice(6);
-              if (data === '[DONE]') {
-                res.write('event: message_stop\n');
-                res.write('data: {"type":"message_stop","stop_reason":"end_turn"}\n\n');
-                continue;
-              }
-
-              try {
-                const parsed = JSON.parse(data);
-                const anthropicEvents = openaiStreamChunkToAnthropic(parsed, originalModel);
-
-                if (anthropicEvents) {
-                  const events = Array.isArray(anthropicEvents) ? anthropicEvents : [anthropicEvents];
-                  for (const ev of events) {
-                    const eventType = ev.type;
-                    res.write(`event: ${eventType}\n`);
-                    res.write(`data: ${JSON.stringify(ev)}\n\n`);
-                  }
+            for (const line of lines) {
+              if (line.startsWith('data: ')) {
+                const data = line.slice(6);
+                if (data === '[DONE]') {
+                  res.write('event: message_stop\n');
+                  res.write('data: {"type":"message_stop","stop_reason":"end_turn"}\n\n');
+                  continue;
                 }
-              } catch (e) {
-                // Skip unparseable chunks
+
+                try {
+                  const parsed = JSON.parse(data);
+                  const anthropicEvents = openaiStreamChunkToAnthropic(parsed, originalModel);
+
+                  if (anthropicEvents) {
+                    const events = Array.isArray(anthropicEvents) ? anthropicEvents : [anthropicEvents];
+                    for (const ev of events) {
+                      const eventType = ev.type;
+                      res.write(`event: ${eventType}\n`);
+                      res.write(`data: ${JSON.stringify(ev)}\n\n`);
+                    }
+                  }
+                } catch (e) {
+                  // Skip unparseable chunks
+                }
               }
             }
-          }
-        }
+          });
+          response.body.on('end', resolve);
+          response.body.on('error', reject);
+        });
 
         res.end();
         return;
