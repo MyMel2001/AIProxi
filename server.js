@@ -385,6 +385,90 @@ function openaiStreamChunkToAnthropic(chunk, originalModel) {
   return events.length > 0 ? events : null;
 }
 
+// Helper: Transform Responses API request to Chat Completions format
+function responsesToChat(body, provider) {
+  const transformed = {
+    model: provider.model,
+    messages: [],
+  };
+
+  // Handle instructions (system prompt)
+  if (body.instructions) {
+    transformed.messages.push({
+      role: 'system',
+      content: body.instructions,
+    });
+  }
+
+  // Handle input
+  if (body.input) {
+    if (typeof body.input === 'string') {
+      transformed.messages.push({
+        role: 'user',
+        content: body.input,
+      });
+    } else if (Array.isArray(body.input)) {
+      body.input.forEach(item => {
+        if (item.role) {
+          transformed.messages.push(item);
+        } else {
+          transformed.messages.push({
+            role: 'user',
+            content: [item],
+          });
+        }
+      });
+    }
+  }
+
+  // Copy other parameters
+  const params = ['temperature', 'top_p', 'max_tokens', 'presence_penalty', 'frequency_penalty', 'stream', 'tools', 'tool_choice'];
+  params.forEach(param => {
+    if (body[param] !== undefined) {
+      transformed[param] = body[param];
+    }
+  });
+
+  return transformed;
+}
+
+// Helper: Transform Chat Completions response to Responses API format
+function chatToResponses(response, originalModel) {
+  const responseId = response.id || `resp_${Date.now()}`;
+  const finalResponse = {
+    id: responseId,
+    object: 'response',
+    model: originalModel,
+    status: 'completed',
+    output: [],
+    usage: response.usage,
+  };
+
+  if (response.choices && response.choices.length > 0) {
+    response.choices.forEach((choice, index) => {
+      const outputItem = {
+        id: `out_${responseId}_${index}`,
+        object: 'response.output',
+        type: 'message',
+        role: choice.message.role || 'assistant',
+        content: [],
+        status: 'completed',
+      };
+
+      if (choice.message.content) {
+        outputItem.content.push({
+          type: 'text',
+          text: choice.message.content,
+        });
+      }
+
+      finalResponse.output.push(outputItem);
+    });
+  }
+
+  return finalResponse;
+}
+
 // Main proxy endpoint (handle both /v1/chat/completions and /chat/completions
 // so clients with base URL ending in /v1 don't get double-prefixed)
 app.post(['/v1/chat/completions', '/chat/completions'], async (req, res) => {
@@ -488,10 +572,10 @@ app.post(['/v1/chat/completions', '/chat/completions'], async (req, res) => {
   });
 });
 
-// OpenAI Completions endpoint (Codex support)
-app.post(['/v1/completions', '/completions'], async (req, res) => {
+// Responses API endpoint (backport to Chat Completions)
+app.post(['/v1/responses', '/responses'], async (req, res) => {
   const isStreaming = !!req.body.stream;
-  const originalModel = req.body.model || 'gpt-3.5-turbo-instruct';
+  const originalModel = req.body.model || 'gpt-4o';
   let lastError = null;
 
   for (let i = 0; i < providers.length; i++) {
@@ -499,10 +583,10 @@ app.post(['/v1/completions', '/completions'], async (req, res) => {
     const attempt = i + 1;
 
     try {
-      console.log(`${isStreaming ? 'Streaming completion ' : 'Completion '}attempt ${attempt}/${providers.length}: Using provider ${provider.endpoint} with model ${provider.model}`);
+      console.log(`Responses ${isStreaming ? 'streaming ' : ''}attempt ${attempt}/${providers.length}: Using provider ${provider.endpoint}`);
 
-      const transformedBody = transformRequest(req.body, provider);
-      const url = `${provider.endpoint}/v1/completions`;
+      const transformedBody = responsesToChat(req.body, provider);
+      const url = `${provider.endpoint}/v1/chat/completions`;
 
       const headers = { 'Content-Type': 'application/json' };
       if (provider.apiKey && provider.apiKey.length > 1) {
@@ -533,7 +617,11 @@ app.post(['/v1/completions', '/completions'], async (req, res) => {
         res.setHeader('Cache-Control', 'no-cache');
         res.setHeader('Connection', 'keep-alive');
 
+        const responseId = `resp_${Date.now()}`;
+        res.write(`event: response.created\ndata: ${JSON.stringify({ id: responseId, object: 'response', status: 'in_progress', model: originalModel })}\n\n`);
+
         await new Promise((resolve, reject) => {
+          let hasOutputAdded = false;
           response.body.on('data', (buf) => {
             const chunk = buf.toString();
             const lines = chunk.split('\n');
@@ -541,24 +629,32 @@ app.post(['/v1/completions', '/completions'], async (req, res) => {
             for (const line of lines) {
               if (line.startsWith('data: ')) {
                 const data = line.slice(6);
-                if (data === '[DONE]') {
-                  res.write('data: [DONE]\n\n');
-                  continue;
-                }
+                if (data === '[DONE]') continue;
 
                 try {
                   const parsed = JSON.parse(data);
-                  const transformed = transformResponse(parsed, originalModel);
-                  res.write(`data: ${JSON.stringify(transformed)}\n\n`);
+                  if (parsed.choices && parsed.choices[0] && parsed.choices[0].delta) {
+                    const delta = parsed.choices[0].delta;
+                    
+                    if (!hasOutputAdded) {
+                      res.write(`event: response.output_item.added\ndata: ${JSON.stringify({ id: `out_${responseId}`, object: 'response.output', type: 'message', role: 'assistant', status: 'in_progress' })}\n\n`);
+                      hasOutputAdded = true;
+                    }
+
+                    if (delta.content) {
+                      res.write(`event: response.output_item.delta\ndata: ${JSON.stringify({ id: `out_${responseId}`, delta: delta.content })}\n\n`);
+                    }
+                  }
                 } catch (e) {
-                  res.write(line + '\n');
+                  // Skip unparseable
                 }
-              } else if (line.trim()) {
-                res.write(line + '\n');
               }
             }
           });
-          response.body.on('end', resolve);
+          response.body.on('end', () => {
+            res.write(`event: response.done\ndata: ${JSON.stringify({ id: responseId, status: 'completed' })}\n\n`);
+            resolve();
+          });
           response.body.on('error', reject);
         });
 
@@ -568,7 +664,7 @@ app.post(['/v1/completions', '/completions'], async (req, res) => {
 
       // === Non-streaming response ===
       const responseData = await response.json();
-      const finalResponse = transformResponse(responseData, originalModel);
+      const finalResponse = chatToResponses(responseData, originalModel);
       return res.json(finalResponse);
 
     } catch (error) {
@@ -579,7 +675,7 @@ app.post(['/v1/completions', '/completions'], async (req, res) => {
   }
 
   // All providers failed
-  console.error('All providers failed for completions request');
+  console.error('All providers failed for Responses request');
   return res.status(500).json({
     error: {
       message: (lastError && lastError.message) || 'All providers failed',
