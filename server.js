@@ -85,11 +85,18 @@ function sanitizePayload(body) {
 }
 
 // Helper: Normalize messages for strict upstream providers
-// Maps 'developer' role to 'system' and flattens array-based text content for system messages.
+// Maps 'developer' role to 'system', flattens array-based text content for system messages,
+// and removes non-standard properties (like 'type') from the message object.
 function normalizeMessages(messages) {
   if (!Array.isArray(messages)) return messages;
   return messages.map(msg => {
-    const newMsg = { ...msg };
+    // Only copy standard OpenAI message fields to avoid validation errors
+    const newMsg = {};
+    if (msg.role) newMsg.role = msg.role;
+    if (msg.content !== undefined) newMsg.content = msg.content;
+    if (msg.name) newMsg.name = msg.name;
+    if (msg.tool_call_id) newMsg.tool_call_id = msg.tool_call_id;
+    if (msg.tool_calls) newMsg.tool_calls = msg.tool_calls;
     
     if (newMsg.role === 'developer') {
       newMsg.role = 'system';
