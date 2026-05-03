@@ -1,8 +1,14 @@
 import express from 'express';
 import fetch from 'node-fetch';
 import dotenv from 'dotenv';
+import http from 'http';
+import https from 'https';
 
 dotenv.config();
+
+const httpAgent = new http.Agent({ keepAlive: true });
+const httpsAgent = new https.Agent({ keepAlive: true });
+const fetchAgent = (parsedUrl) => parsedUrl.protocol === 'http:' ? httpAgent : httpsAgent;
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -407,10 +413,13 @@ app.post(['/v1/chat/completions', '/chat/completions'], async (req, res) => {
         headers['Authorization'] = `Bearer ${provider.apiKey}`;
       }
 
+      const abortSignal = AbortSignal.timeout ? AbortSignal.timeout(620000) : undefined;
       const response = await fetch(url, {
         method: 'POST',
         headers,
         body: JSON.stringify(transformedBody),
+        agent: fetchAgent,
+        ...(abortSignal && { signal: abortSignal })
       });
 
       if (!response.ok) {
@@ -570,10 +579,13 @@ app.post(['/v1/messages', '/messages'], async (req, res) => {
         headers['Authorization'] = `Bearer ${provider.apiKey}`;
       }
 
+      const abortSignal = AbortSignal.timeout ? AbortSignal.timeout(620000) : undefined;
       const response = await fetch(url, {
         method: 'POST',
         headers,
         body: JSON.stringify(transformedBody),
+        agent: fetchAgent,
+        ...(abortSignal && { signal: abortSignal })
       });
 
       if (!response.ok) {
