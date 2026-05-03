@@ -45,11 +45,11 @@ app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 // Helper: Check if error is retryable
+// For a fallback proxy, virtually all provider errors should trigger fallback
+// since each provider has its own credentials, model, and endpoint.
 function isRetryableError(error, statusCode) {
-  if (statusCode >= 500) return true;
-  if (statusCode === 429) return true; // Rate limit
-  if (error.code === 'ECONNRESET' || error.code === 'ETIMEDOUT') return true;
-  return false;
+  // Always retry — the next provider may work even if this one returned 4xx
+  return true;
 }
 
 // Helper: Transform request for multimodal support
@@ -387,6 +387,7 @@ function openaiStreamChunkToAnthropic(chunk, originalModel) {
 // Main proxy endpoint (handle both /v1/chat/completions and /chat/completions
 // so clients with base URL ending in /v1 don't get double-prefixed)
 app.post(['/v1/chat/completions', '/chat/completions'], async (req, res) => {
+  const isStreaming = !!req.body.stream;
   const originalModel = req.body.model || 'gpt-3.5-turbo';
   let lastError = null;
 
@@ -395,7 +396,7 @@ app.post(['/v1/chat/completions', '/chat/completions'], async (req, res) => {
     const attempt = i + 1;
 
     try {
-      console.log(`Attempt ${attempt}/${providers.length}: Using provider ${provider.endpoint} with model ${provider.model}`);
+      console.log(`${isStreaming ? 'Streaming a' : 'A'}ttempt ${attempt}/${providers.length}: Using provider ${provider.endpoint} with model ${provider.model}`);
 
       const transformedBody = transformRequest(req.body, provider);
       const url = `${provider.endpoint}/v1/chat/completions`;
@@ -409,20 +410,57 @@ app.post(['/v1/chat/completions', '/chat/completions'], async (req, res) => {
         body: JSON.stringify(transformedBody),
       });
 
-      const responseData = await response.json();
-
       if (!response.ok) {
-        lastError = new Error(`Provider ${attempt} failed: ${(responseData.error && responseData.error.message) || response.statusText}`);
+        let errorData;
+        try { errorData = await response.json(); } catch (_) { errorData = {}; }
+        lastError = new Error(`Provider ${attempt} failed: ${(errorData.error && errorData.error.message) || response.statusText}`);
         console.error(`Provider ${attempt} error:`, lastError.message);
-
-        if (isRetryableError(lastError, response.status)) {
-          continue; // Try next provider
-        }
-        // Non-retryable error - return immediately
-        return res.status(response.status).json(responseData);
+        continue; // Always try next provider on failure
       }
 
-      // Success - transform response and return
+      // === Streaming response ===
+      if (isStreaming) {
+        res.setHeader('Content-Type', 'text/event-stream');
+        res.setHeader('Cache-Control', 'no-cache');
+        res.setHeader('Connection', 'keep-alive');
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          const chunk = decoder.decode(value);
+          const lines = chunk.split('\n');
+
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              const data = line.slice(6);
+              if (data === '[DONE]') {
+                res.write('data: [DONE]\n\n');
+                continue;
+              }
+
+              try {
+                const parsed = JSON.parse(data);
+                const transformed = transformResponse(parsed, originalModel);
+                res.write(`data: ${JSON.stringify(transformed)}\n\n`);
+              } catch (e) {
+                res.write(line + '\n');
+              }
+            } else if (line.trim()) {
+              res.write(line + '\n');
+            }
+          }
+        }
+
+        res.end();
+        return;
+      }
+
+      // === Non-streaming response ===
+      const responseData = await response.json();
       const finalResponse = transformResponse(responseData, originalModel);
       return res.json(finalResponse);
 
@@ -435,104 +473,6 @@ app.post(['/v1/chat/completions', '/chat/completions'], async (req, res) => {
 
   // All providers failed
   console.error('All providers failed');
-  return res.status(500).json({
-    error: {
-      message: (lastError && lastError.message) || 'All providers failed',
-      type: 'api_error',
-      code: 'all_providers_failed',
-    },
-  });
-});
-
-// Streaming support
-app.post(['/v1/chat/completions', '/chat/completions'], async (req, res) => {
-  if (!req.body.stream) {
-    // Non-streaming handled above
-    return;
-  }
-
-  const originalModel = req.body.model || 'gpt-3.5-turbo';
-  let lastError = null;
-
-  for (let i = 0; i < providers.length; i++) {
-    const provider = providers[i];
-    const attempt = i + 1;
-
-    try {
-      console.log(`Streaming attempt ${attempt}/${providers.length}: Using provider ${provider.endpoint}`);
-
-      const transformedBody = transformRequest(req.body, provider);
-      const url = `${provider.endpoint}/v1/chat/completions`;
-
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${provider.apiKey}`,
-        },
-        body: JSON.stringify(transformedBody),
-      });
-
-      if (!response.ok) {
-        const errorData = await response.json();
-        lastError = new Error(`Provider ${attempt} failed: ${(errorData.error && errorData.error.message) || response.statusText}`);
-        console.error(`Provider ${attempt} error:`, lastError.message);
-
-        if (isRetryableError(lastError, response.status)) {
-          continue;
-        }
-        return res.status(response.status).json(errorData);
-      }
-
-      // Set up streaming response
-      res.setHeader('Content-Type', 'text/event-stream');
-      res.setHeader('Cache-Control', 'no-cache');
-      res.setHeader('Connection', 'keep-alive');
-
-      // Pipe the stream, transforming model names
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        const chunk = decoder.decode(value);
-        const lines = chunk.split('\n');
-
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            const data = line.slice(6);
-            if (data === '[DONE]') {
-              res.write('data: [DONE]\n\n');
-              continue;
-            }
-
-            try {
-              const parsed = JSON.parse(data);
-              const transformed = transformResponse(parsed, originalModel);
-              res.write(`data: ${JSON.stringify(transformed)}\n\n`);
-            } catch (e) {
-              res.write(line + '\n');
-            }
-          } else if (line.trim()) {
-            res.write(line + '\n');
-          }
-        }
-      }
-
-      res.end();
-      return;
-
-    } catch (error) {
-      lastError = error;
-      console.error(`Provider ${attempt} error:`, error.message);
-      continue;
-    }
-  }
-
-  // All providers failed
-  console.error('All providers failed for streaming');
   return res.status(500).json({
     error: {
       message: (lastError && lastError.message) || 'All providers failed',
@@ -602,9 +542,10 @@ app.get(['/v1/models/:modelId', '/models/:modelId'], (req, res) => {
 
 // ==================== Anthropic API Endpoints ====================
 
-// Anthropic messages endpoint (non-streaming)
+// Anthropic messages endpoint (streaming + non-streaming)
 // Handle both /v1/messages and /messages for clients that include /v1 in base URL
 app.post(['/v1/messages', '/messages'], async (req, res) => {
+  const isStreaming = !!req.body.stream;
   const originalModel = req.body.model || 'claude-3-opus-20240229';
   let lastError = null;
 
@@ -613,7 +554,7 @@ app.post(['/v1/messages', '/messages'], async (req, res) => {
     const attempt = i + 1;
 
     try {
-      console.log(`Anthropic attempt ${attempt}/${providers.length}: Using provider ${provider.endpoint}`);
+      console.log(`Anthropic ${isStreaming ? 'streaming ' : ''}attempt ${attempt}/${providers.length}: Using provider ${provider.endpoint}`);
 
       const transformedBody = anthropicToOpenai(req.body, provider);
       const url = `${provider.endpoint}/v1/chat/completions`;
@@ -627,26 +568,64 @@ app.post(['/v1/messages', '/messages'], async (req, res) => {
         body: JSON.stringify(transformedBody),
       });
 
-      const responseData = await response.json();
-
       if (!response.ok) {
-        lastError = new Error(`Provider ${attempt} failed: ${(responseData.error && responseData.error.message) || response.statusText}`);
+        let errorData;
+        try { errorData = await response.json(); } catch (_) { errorData = {}; }
+        lastError = new Error(`Provider ${attempt} failed: ${(errorData.error && errorData.error.message) || response.statusText}`);
         console.error(`Provider ${attempt} error:`, lastError.message);
-
-        if (isRetryableError(lastError, response.status)) {
-          continue;
-        }
-        // Return Anthropic-style error
-        return res.status(response.status).json({
-          type: 'error',
-          error: {
-            type: (responseData.error && responseData.error.type) || 'api_error',
-            message: (responseData.error && responseData.error.message) || response.statusText,
-          },
-        });
+        continue; // Always try next provider on failure
       }
 
-      // Transform to Anthropic format
+      // === Streaming response ===
+      if (isStreaming) {
+        res.setHeader('Content-Type', 'text/event-stream');
+        res.setHeader('Cache-Control', 'no-cache');
+        res.setHeader('Connection', 'keep-alive');
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          const chunk = decoder.decode(value);
+          const lines = chunk.split('\n');
+
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              const data = line.slice(6);
+              if (data === '[DONE]') {
+                res.write('event: message_stop\n');
+                res.write('data: {"type":"message_stop","stop_reason":"end_turn"}\n\n');
+                continue;
+              }
+
+              try {
+                const parsed = JSON.parse(data);
+                const anthropicEvents = openaiStreamChunkToAnthropic(parsed, originalModel);
+
+                if (anthropicEvents) {
+                  const events = Array.isArray(anthropicEvents) ? anthropicEvents : [anthropicEvents];
+                  for (const ev of events) {
+                    const eventType = ev.type;
+                    res.write(`event: ${eventType}\n`);
+                    res.write(`data: ${JSON.stringify(ev)}\n\n`);
+                  }
+                }
+              } catch (e) {
+                // Skip unparseable chunks
+              }
+            }
+          }
+        }
+
+        res.end();
+        return;
+      }
+
+      // === Non-streaming response ===
+      const responseData = await response.json();
       const finalResponse = openaiToAnthropic(responseData, originalModel);
       return res.json(finalResponse);
 
@@ -659,117 +638,6 @@ app.post(['/v1/messages', '/messages'], async (req, res) => {
 
   // All providers failed
   console.error('All providers failed for Anthropic request');
-  return res.status(500).json({
-    type: 'error',
-    error: {
-      type: 'api_error',
-      message: (lastError && lastError.message) || 'All providers failed',
-    },
-  });
-});
-
-// Anthropic messages endpoint (streaming)
-app.post(['/v1/messages', '/messages'], async (req, res) => {
-  if (!req.body.stream) {
-    // Non-streaming handled above
-    return;
-  }
-
-  const originalModel = req.body.model || 'claude-3-opus-20240229';
-  let lastError = null;
-
-  for (let i = 0; i < providers.length; i++) {
-    const provider = providers[i];
-    const attempt = i + 1;
-
-    try {
-      console.log(`Anthropic streaming attempt ${attempt}/${providers.length}: Using provider ${provider.endpoint}`);
-
-      const transformedBody = anthropicToOpenai(req.body, provider);
-      const url = `${provider.endpoint}/v1/chat/completions`;
-
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${provider.apiKey}`,
-        },
-        body: JSON.stringify(transformedBody),
-      });
-
-      if (!response.ok) {
-        const errorData = await response.json();
-        lastError = new Error(`Provider ${attempt} failed: ${(errorData.error && errorData.error.message) || response.statusText}`);
-        console.error(`Provider ${attempt} error:`, lastError.message);
-
-        if (isRetryableError(lastError, response.status)) {
-          continue;
-        }
-        return res.status(response.status).json({
-          type: 'error',
-          error: {
-            type: (errorData.error && errorData.error.type) || 'api_error',
-            message: (errorData.error && errorData.error.message) || response.statusText,
-          },
-        });
-      }
-
-      // Set up streaming response
-      res.setHeader('Content-Type', 'text/event-stream');
-      res.setHeader('Cache-Control', 'no-cache');
-      res.setHeader('Connection', 'keep-alive');
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let messageStarted = false;
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        const chunk = decoder.decode(value);
-        const lines = chunk.split('\n');
-
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            const data = line.slice(6);
-            if (data === '[DONE]') {
-              res.write('event: message_stop\n');
-              res.write('data: {"type":"message_stop","stop_reason":"end_turn"}\n\n');
-              continue;
-            }
-
-            try {
-              const parsed = JSON.parse(data);
-              const anthropicEvents = openaiStreamChunkToAnthropic(parsed, originalModel);
-
-              if (anthropicEvents) {
-                const events = Array.isArray(anthropicEvents) ? anthropicEvents : [anthropicEvents];
-                for (const ev of events) {
-                  const eventType = ev.type;
-                  res.write(`event: ${eventType}\n`);
-                  res.write(`data: ${JSON.stringify(ev)}\n\n`);
-                }
-              }
-            } catch (e) {
-              // Skip unparseable chunks
-            }
-          }
-        }
-      }
-
-      res.end();
-      return;
-
-    } catch (error) {
-      lastError = error;
-      console.error(`Provider ${attempt} error:`, error.message);
-      continue;
-    }
-  }
-
-  // All providers failed
-  console.error('All providers failed for Anthropic streaming');
   return res.status(500).json({
     type: 'error',
     error: {
