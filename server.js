@@ -472,34 +472,27 @@ app.get('/health', (req, res) => {
 
 // Models endpoints
 app.get('/v1/models', (req, res) => {
+  const models = [
+    'proxy_fallback',
+    'claude-3-5-sonnet-20241022',
+    'claude-3-7-sonnet-20250219',
+    'claude-3-opus-20240229',
+    'claude-3-sonnet-20240229',
+    'claude-3-haiku-20240307',
+    'claude-opus-4-7'
+  ];
+
   res.json({
     object: 'list',
-    data: [
-      {
-        id: 'proxy_fallback',
-        object: 'model',
-        created: Math.floor(Date.now() / 1000),
-        owned_by: 'system',
-        type: 'model',
-        display_name: 'Proxy Fallback'
-      },
-      {
-        id: 'claude-3-5-sonnet-20241022',
-        object: 'model',
-        created: Math.floor(Date.now() / 1000),
-        owned_by: 'system',
-        type: 'model',
-        display_name: 'Claude 3.5 Sonnet'
-      },
-      {
-        id: 'claude-3-7-sonnet-20250219',
-        object: 'model',
-        created: Math.floor(Date.now() / 1000),
-        owned_by: 'system',
-        type: 'model',
-        display_name: 'Claude 3.7 Sonnet'
-      }
-    ]
+    data: models.map(id => ({
+      id: id,
+      object: 'model',
+      created: Math.floor(Date.now() / 1000),
+      owned_by: 'system',
+      type: 'model',
+      display_name: id,
+      created_at: new Date().toISOString()
+    }))
   });
 });
 
@@ -510,7 +503,8 @@ app.get('/v1/models/:modelId', (req, res) => {
     created: Math.floor(Date.now() / 1000),
     owned_by: 'system',
     type: 'model',
-    display_name: req.params.modelId
+    display_name: req.params.modelId,
+    created_at: new Date().toISOString()
   });
 });
 
