@@ -385,22 +385,31 @@ function openaiStreamChunkToAnthropic(chunk, originalModel) {
   return events.length > 0 ? events : null;
 }
 
-// Main proxy endpoint (handle both /v1/chat/completions and /chat/completions
-// so clients with base URL ending in /v1 don't get double-prefixed)
-app.post(['/v1/chat/completions', '/chat/completions'], async (req, res) => {
+// Main proxy endpoint (handle /v1/chat/completions, /v1/responses, /v1/completions)
+app.post([
+  '/v1/chat/completions', '/chat/completions',
+  '/v1/responses', '/responses',
+  '/v1/completions', '/completions'
+], async (req, res) => {
   const isStreaming = !!req.body.stream;
   const originalModel = req.body.model || 'gpt-3.5-turbo';
   let lastError = null;
+
+  // Determine which endpoint path was requested so we can forward accurately
+  let endpointPath = req.path;
+  if (endpointPath.startsWith('/v1/')) {
+    endpointPath = endpointPath.slice(3); // strip /v1 so we can prepend it cleanly
+  }
 
   for (let i = 0; i < providers.length; i++) {
     const provider = providers[i];
     const attempt = i + 1;
 
     try {
-      console.log(`${isStreaming ? 'Streaming a' : 'A'}ttempt ${attempt}/${providers.length}: Using provider ${provider.endpoint} with model ${provider.model}`);
+      console.log(`${isStreaming ? 'Streaming a' : 'A'}ttempt ${attempt}/${providers.length}: Using provider ${provider.endpoint} with model ${provider.model} for ${endpointPath}`);
 
       const transformedBody = transformRequest(req.body, provider);
-      const url = `${provider.endpoint}/v1/chat/completions`;
+      const url = `${provider.endpoint}/v1${endpointPath}`;
 
       const headers = { 'Content-Type': 'application/json' };
       if (provider.apiKey && provider.apiKey.length > 1) {
