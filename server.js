@@ -64,10 +64,23 @@ function transformRequest(body, provider) {
 
   // Normalize roles (e.g. developer -> system for providers that don't support it)
   if (transformed.messages) {
-    transformed.messages = transformed.messages.map(msg => ({
-      ...msg,
-      role: msg.role === 'developer' ? 'system' : msg.role,
-    }));
+    transformed.messages = transformed.messages.map(msg => {
+      // Normalize role
+      const role = msg.role === 'developer' ? 'system' : msg.role;
+      
+      // Normalize content blocks (e.g. input_text -> text)
+      let content = msg.content;
+      if (Array.isArray(content)) {
+        content = content.map(block => {
+          if (typeof block === 'object' && block !== null && block.type === 'input_text') {
+            return { ...block, type: 'text' };
+          }
+          return block;
+        });
+      }
+      
+      return { ...msg, role, content };
+    });
   }
 
   // Handle multimodal content (images, audio, etc.)
@@ -406,11 +419,27 @@ function responsesToChat(body, provider) {
     return role;
   };
 
+  // Helper to normalize content blocks (e.g. input_text -> text)
+  const normalizeContent = (content) => {
+    if (typeof content === 'string') return content;
+    if (Array.isArray(content)) {
+      return content.map(block => {
+        if (typeof block === 'object' && block !== null) {
+          if (block.type === 'input_text') {
+            return { ...block, type: 'text' };
+          }
+        }
+        return block;
+      });
+    }
+    return content;
+  };
+
   // Handle instructions (system prompt)
   if (body.instructions) {
     transformed.messages.push({
       role: 'system',
-      content: body.instructions,
+      content: normalizeContent(body.instructions),
     });
   }
 
@@ -427,10 +456,12 @@ function responsesToChat(body, provider) {
           transformed.messages.push({
             ...item,
             role: normalizeRole(item.role),
+            content: normalizeContent(item.content),
           });
         } else {
           // If it's a content block or a string
-          const content = typeof item === 'string' ? item : [item];
+          const normalized = normalizeContent(item);
+          const content = typeof normalized === 'string' ? normalized : [normalized];
           transformed.messages.push({
             role: 'user',
             content: content,
