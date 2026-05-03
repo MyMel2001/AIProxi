@@ -62,6 +62,14 @@ function transformRequest(body, provider) {
     transformed.model = provider.model;
   }
 
+  // Normalize roles (e.g. developer -> system for providers that don't support it)
+  if (transformed.messages) {
+    transformed.messages = transformed.messages.map(msg => ({
+      ...msg,
+      role: msg.role === 'developer' ? 'system' : msg.role,
+    }));
+  }
+
   // Handle multimodal content (images, audio, etc.)
   if (transformed.messages) {
     transformed.messages = transformed.messages.map(msg => {
@@ -392,6 +400,12 @@ function responsesToChat(body, provider) {
     messages: [],
   };
 
+  // Helper to normalize roles (e.g. developer -> system for older models)
+  const normalizeRole = (role) => {
+    if (role === 'developer') return 'system';
+    return role;
+  };
+
   // Handle instructions (system prompt)
   if (body.instructions) {
     transformed.messages.push({
@@ -409,12 +423,17 @@ function responsesToChat(body, provider) {
       });
     } else if (Array.isArray(body.input)) {
       body.input.forEach(item => {
-        if (item.role) {
-          transformed.messages.push(item);
+        if (typeof item === 'object' && item !== null && item.role) {
+          transformed.messages.push({
+            ...item,
+            role: normalizeRole(item.role),
+          });
         } else {
+          // If it's a content block or a string
+          const content = typeof item === 'string' ? item : [item];
           transformed.messages.push({
             role: 'user',
-            content: [item],
+            content: content,
           });
         }
       });
@@ -586,6 +605,7 @@ app.post(['/v1/responses', '/responses'], async (req, res) => {
       console.log(`Responses ${isStreaming ? 'streaming ' : ''}attempt ${attempt}/${providers.length}: Using provider ${provider.endpoint}`);
 
       const transformedBody = responsesToChat(req.body, provider);
+      console.log(`Transformed body for provider ${provider.endpoint}:`, JSON.stringify(transformedBody, null, 2));
       const url = `${provider.endpoint}/v1/chat/completions`;
 
       const headers = { 'Content-Type': 'application/json' };
